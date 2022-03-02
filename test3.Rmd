@@ -1,0 +1,238 @@
+---
+title: "TA_test3"
+output: html_document
+date: '2022-03-01'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(tidytext)
+library(jsonlite)
+library(FactoMineR)
+library(tidyr)
+library(topicmodels)
+library(qdap)
+library(tm)
+library(wordcloud)
+library(stringr)
+library(textstem) # use lemmatize_words()
+```
+
+## Text Cleaning
+
+```{r}
+   amazon_reviews <- stream_in(gzfile("reviews_Tools_and_Home_Improvement_5.json.gz"))
+  #amazon_reviews <- read.csv("reviews_Tools_and_Home_Improvement_5.csv")
+```
+
+```{r}
+  # View the data structure
+  glimpse(amazon_reviews)
+```
+
+
+```{r}
+  #Let us normalize it by creating a new key to track each review
+  amazon_reviews$review_id <- 1:nrow(amazon_reviews)
+  # Remove whitespace
+  amazon_reviews$reviewText = str_squish(amazon_reviews$reviewText)
+  # Replace Contractions
+  amazon_reviews$reviewText = replace_contraction(amazon_reviews$reviewText)
+  
+  # Replace Symbols With Word Equivalents
+  amazon_reviews$reviewText = replace_symbol(amazon_reviews$reviewText)
+  # Remove punctuation marks
+  # amazon_reviews$reviewText = removePunctuation(amazon_reviews$reviewText)
+  # View the more frequent words
+  plot(freq_terms(amazon_reviews$reviewText))
+```
+
+After glimpsing the review text, there is no high frequency of abbreviation words such as "pls" so that it is not applied the step of replacing abbreviations.
+
+## Tokenization, removing stop words and Lemmatization
+
+```{r}
+  token_reviews <-  amazon_reviews %>% 
+    unnest_tokens(word,reviewText) 
+```
+
+```{r}
+  token_df <- subset(token_reviews, select = -c(helpful))
+  write.csv(token_df, file="token_reviews.csv")
+```
+
+```{r}
+  token_reviews <- read_csv("token_reviews.csv")
+```
+
+```{r}
+  # Add numbers and other common words as stopwords as well
+  my_words <- c("tool", seq(0:60000)) 
+  my_dict <- tibble(word = my_words,lexicon = "mine" )
+  my_stopwords <- stop_words %>% 
+   bind_rows(my_dict)
+  # Remove all stop words
+  reviews_without_mystopwords_tools_token <- amazon_reviews %>% 
+    unnest_tokens(word,reviewText) %>%
+    anti_join(my_stopwords) 
+  # Lemmatize words
+  reviews_without_mystopwords_tools_token$word = lemmatize_words(reviews_without_mystopwords_tools_token$word)
+```
+
+```{r}
+  token_df2 <- subset(reviews_without_mystopwords_tools_token, select = -c(helpful))
+  write.csv(token_df2, file="tidy_reviews.csv")
+```
+
+```{r}
+  reviews_without_mystopwords_tools_token <- read_csv("tidy_reviews.csv")
+```
+
+```{r}
+  # Check that it doesn't match any non-letter
+  letters_only <- function(x) !grepl("[^A-Za-z]", x)
+  # Filter out the words contain numbers
+  aaa <- reviews_without_mystopwords_tools_token %>%
+    select(word) %>%
+    mutate(letters_or_not = letters_only(word)) %>%
+    filter(letters_or_not == FALSE)
+    
+  my_dict2 <- tibble(word = aaa$word, lexicon = "mine")
+  
+  # Remove the words contain numbers
+  reviews_without_mystopwords_tools_token  <- reviews_without_mystopwords_tools_token  %>% 
+    anti_join(my_dict2)
+    
+```
+
+
+
+
+
+```{r}
+  # Set random seed
+  set.seed(123)
+
+  # Randomly sample 1% of the dataset and assign to RndSampledData
+  RndSampledData <- sample_frac(amazon_reviews, 0.01)
+```
+
+
+```{r}
+  library(magrittr)
+  
+  # Calc overall polarity score
+  RndSampledData %$% polarity(reviewText)
+
+  # Calc polarity score by rating
+  (amazon_polarity <- RndSampledData %$% polarity(reviewText, overall))
+
+  # Counts table from amazon_polarity
+  counts(amazon_polarity)
+
+  # Plot the review polarity
+  plot(amazon_polarity )
+  
+```
+
+
+
+Step 2: Compute td, idf and tf_idf values
+
+```{r}
+  tool_reviews_counts <- reviews_without_mystopwords_tools_token %>% 
+      count(word, overall, sort = TRUE) %>%
+      ungroup() %>%
+      rename(count=n)
+```
+
+
+
+```{r}
+  tools_reviews_tfidf <- tool_reviews_counts %>% 
+      bind_tf_idf(word, overall, count)
+  # idf = 0 is fine, which means the word presents in all rating scores.
+```
+
+
+by overall
+```{r}
+  # Get Bing lexicon
+  bing <- get_sentiments("bing")
+
+  tool_polarity <- tool_reviews_counts %>%
+  # Inner join to the lexicon
+  inner_join(bing, c("word" = "word")) %>%
+  # Count by sentiment, index
+  count(sentiment, overall) %>%
+  # Spread sentiments
+  spread(sentiment, n, fill = 0) %>%
+  mutate(
+    # Add polarity field
+    polarity = positive - negative,
+    # Add rating field
+    rating = overall
+  )
+```
+
+
+```{r}
+   library(ggthemes)
+  # Plot polarity vs. rating
+  ggplot(tool_polarity, aes(rating, polarity)) + 
+  # Add a smooth trend curve
+  geom_smooth() +
+  # Add a horizontal line at y = 0
+  geom_hline(yintercept = 0, color = "red") +
+  # Add a plot title
+  ggtitle("Amazon Reviews on Tools and Home Improvement: Polarity") +
+  theme_gdocs()
+```
+
+
+
+sentiment by words
+```{r}
+  tool_tidy_sentiment <- tool_reviews_counts %>% 
+  # Inner join to bing lexicon by word = word
+  inner_join(bing, by = c("word" = "word")) %>% 
+  # Count by term and sentiment, weighted by count
+  count(word, sentiment, wt = count) %>%
+  # Spread sentiment, using n as values
+  spread(sentiment, n, fill = 0) %>%
+  # Mutate to add a polarity column
+  mutate(polarity = positive - negative)
+
+  # Review
+  tool_tidy_sentiment
+```
+
+```{r}
+  tool_tidy_pol <- tool_tidy_sentiment %>% 
+  # Filter for absolute polarity at least 50 
+  filter(abs(polarity) >= 50) %>% 
+  # Add positive/negative status
+  mutate(
+    pos_or_neg = ifelse(polarity > 0, "positive", "negative")
+  )
+```
+
+
+```{r}
+ 
+  # Plot polarity vs. (term reordered by polarity), filled by pos_or_neg
+  ggplot(tool_tidy_pol, aes(reorder(word, polarity), polarity, fill = pos_or_neg)) +
+  geom_col() + 
+  ggtitle("Amazon Reviews on Tools and Home Improvement: Sentiment Word Frequency") + 
+  theme_gdocs() +
+  # Rotate text and vertically justify
+  theme(axis.text.x = element_text(angle = 90, vjust = -0.1))
+```
+
+
+
+
